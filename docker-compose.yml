@@ -101,6 +101,7 @@ services:
     volumes:
       - ./lc-agent:/app          # live reload for prompt/tool-hint edits
     environment:
+      PYTHONDONTWRITEBYTECODE: "1"
       AGENT_API_KEY: ${AGENT_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_KEY: ${OPENROUTER_KEY:-}

@@ -3,8 +3,69 @@
 version: 1.2.1
 cache: true
 
+# Model specs disable modelSelect/presets/parameters unless you re-enable them.
+# Keep modelSelect on so OpenRouter and the individual specialists stay reachable.
 interface:
   customWelcome: "SonyLIV Concurrency Assistant — pick liv-analyst and just ask. It routes to the right specialist for you."
+  modelSelect: true
+
+modelSpecs:
+  enforce: false
+  prioritize: true
+  list:
+    - name: 'liv-analyst'
+      label: 'Concurrency Analyst'
+      description: 'Ask anything about foreground viewing concurrency. Routes to the right specialist and queries ClickHouse before answering.'
+      default: true
+      showOnLanding: true
+      conversation_starters:
+        - 'What was our peak concurrency, and exactly when did it happen?'
+        - 'Which platform carries the most load, and do platforms peak at the same time?'
+        - 'Compare weekday and weekend concurrency, and tell me what it means for capacity.'
+        - 'What should I provision for next weekend, and how much headroom?'
+      preset:
+        endpoint: 'Concurrency Agents'
+        model: 'liv-analyst'
+        modelLabel: 'Concurrency Analyst'
+        greeting: |
+          I answer questions about foreground viewing concurrency by querying ClickHouse.
+          Ask in plain language — I'll pick the right specialist and show my working in the trace.
+
+    - name: 'liv-concurrency-spec'
+      label: 'Concurrency numbers'
+      description: 'Peak and average concurrent sessions, and the exact minute a peak occurred.'
+      group: 'Specialists'
+      conversation_starters:
+        - 'Peak concurrency for the whole range, with the minute it happened'
+        - 'Peak vs average — how spiky was demand?'
+        - 'Concurrency on ANDROID_PHONE in India'
+      preset:
+        endpoint: 'Concurrency Agents'
+        model: 'liv-concurrency'
+
+    - name: 'liv-segment-spec'
+      label: 'Segment breakdown'
+      description: 'Compares concurrency across platforms, countries, content types and titles.'
+      group: 'Specialists'
+      conversation_starters:
+        - 'Break concurrency down by platform'
+        - 'Which titles drove the busiest hour?'
+        - 'Do countries peak at the same time as each other?'
+      preset:
+        endpoint: 'Concurrency Agents'
+        model: 'liv-segment'
+
+    - name: 'liv-capacity-spec'
+      label: 'Capacity planning'
+      description: 'Turns peak and average into provisioning advice and headroom.'
+      group: 'Specialists'
+      conversation_starters:
+        - 'What number should I size capacity for?'
+        - 'How much headroom above peak do you recommend?'
+        - 'Was the peak a one-off or does it repeat?'
+      preset:
+        endpoint: 'Concurrency Agents'
+        model: 'liv-capacity'
 
 # ── MCP servers for LibreChat's own UI agents ────────────────────────────────
 # The Cloud remote MCP signs in via OAuth in the browser, which works here
