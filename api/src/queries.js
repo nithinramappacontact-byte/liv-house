@@ -217,10 +217,15 @@ export const segmentQueries = (f, dimKey, topN = 8) => {
         ),
         by_seg AS (SELECT seg, sum(c) AS sm FROM per_seg GROUP BY seg)
         SELECT
-          count()                                        AS segments,
-          round(100 * max(sm) / sum(sm), 2)              AS largest_share_pct,
-          round(100 * sum(if(sm >= q90, sm, 0)) / sum(sm), 2) AS top_decile_share_pct
-        FROM by_seg, (SELECT quantileExact(0.9)(sm) AS q90 FROM by_seg)`,
+          length(arr) AS segments,
+          round(100 * arrayMax(arr) / greatest(1, total), 2) AS largest_share_pct,
+          round(100 * arraySum(arraySlice(
+                 arrayReverseSort(arr), 1,
+                 greatest(1, toUInt32(ceil(length(arr) / 10)))
+               )) / greatest(1, total), 2) AS top_decile_share_pct
+        FROM (
+          SELECT groupArray(sm) AS arr, sum(sm) AS total FROM by_seg
+        )`,
     },
   ];
 };
