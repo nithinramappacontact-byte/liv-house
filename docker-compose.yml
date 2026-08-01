@@ -232,6 +232,27 @@ services:
       start_period: 20s
       retries: 12
     networks: [liv]
+  # ---------------- Prompt-ops pipeline (on demand) ----------------
+  # Not started by `docker compose up` — it lives behind a profile and is run
+  # explicitly. Inside the network it reaches the agent by service name, so no
+  # published port is needed.
+  #
+  #   docker compose run --rm prompt-ops
+  #   docker compose run --rm prompt-ops python evals/ground_truth.py
+  prompt-ops:
+    build: ./langfuse
+    image: liv/prompt-ops:local
+    profiles: ["ops"]
+    depends_on:
+      lc-agent:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Overrides the host-oriented value in .env — service DNS, not localhost.
+      AGENT_BASE_URL: http://lc-agent:3002/v1
+    volumes:
+      - ./langfuse:/app          # edit evaluators without rebuilding
+    networks: [liv]
 
 volumes:
   mongo_data:

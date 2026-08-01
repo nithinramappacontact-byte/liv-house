@@ -1,49 +1,140 @@
-# Langfuse integration
+# Self-improving agent loop
 
-Two jobs, both wired into `lc-agent`.
+Prompt-ops for the concurrency agents: ground truth from ClickHouse, experiments
+against the live agent, and automatic prompt publishing when a challenger wins.
 
-## 1. Tracing
+Runs standalone on your machine — a separate Python env from the containers.
 
-`lc-agent/langfuse_trace.py` attaches a LangChain `CallbackHandler` to every
-agent run. Each trace captures the LLM calls **and every MCP tool call** —
-which means the exact SQL the agent sent to ClickHouse is recorded alongside
-the answer it produced.
-
-That is the part worth demoing. A concurrency number in a chat window is
-unverifiable; a trace showing `run_select_query` with the SQL, the rows
-returned, and the answer derived from them is evidence.
-
-Traces are tagged `lc-agent`, the agent id, and `concurrency`, and grouped by
-LibreChat conversation id as the session, so a multi-turn conversation reads
-as one thread in the Langfuse UI.
-
-If `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` are unset, tracing silently
-no-ops and the agents run normally.
-
-## 2. Prompt management
-
-`lc-agent/langfuse_prompts.py` fetches each agent's system prompt from
-Langfuse by name and label at run time. Publish a new `production` version in
-the Langfuse UI and the agents pick it up within the SDK's cache TTL — no
-rebuild, no restart.
-
-The agent graph is cached by `(agent_id, prompt_version)`, so a new version
-rebuilds the graph rather than being ignored.
-
-### Publishing the starting prompts
-
-```bash
-docker compose exec lc-agent python push_agent_prompts.py
-docker compose exec lc-agent python push_agent_prompts.py --list
+```
+langfuse/
+├── langfuse_client.py          # LF client, ClickHouse, agent HTTP, role LLMs
+├── evals/
+│   ├── ground_truth.py         # correct answers computed from ClickHouse
+│   ├── correctness.py          # deterministic evaluators (no LLM)
+│   ├── llm_judge.py            # subjective axes only
+│   └── seed_datasets.py        # questions + ground truth -> Langfuse datasets
+├── experiments/
+│   ├── run_experiment.py       # runs against the LIVE agent endpoint
+│   └── auto_improve.py         # compare runs -> rewrite -> publish
+└── scripts/run_pipeline.sh
 ```
 
-### What is deliberately NOT in the prompts
+## What makes this different from generic prompt-ops
 
-Schema and the three concurrency correctness rules live in
-`lc-agent/config.py` as `CLICKHOUSE_TOOL_HINT`, appended automatically to
-whichever prompt is resolved.
+**Correctness is measured, not judged.** Concurrency has a right answer: the
+peak IS a number and it DID occur at a specific minute. `ground_truth.py`
+computes both from ClickHouse at seed time, and `correctness.py` checks the
+agent's answer against them with no LLM involved. The judge is left to score
+only what no query can settle — groundedness, concision, actionability, clarity.
 
-This split matters. Prompts in Langfuse are editable by anyone with UI
-access; the rules that stop an agent writing plausible-but-wrong SQL are not.
-Someone tuning tone in the Langfuse UI cannot accidentally delete the
-instruction that says peak must be recomputed rather than summed.
+That distinction matters. Asking a model to grade a number it cannot verify
+produces confident noise, and a loop optimising against that noise drifts
+toward answers that read well and are wrong.
+
+**Experiments hit the live agent.** `run_experiment.py` POSTs to lc-agent's
+OpenAI-compatible endpoint, so each run exercises the real MCP tools, the real
+Langfuse-served prompt, and the supervisor's real routing. A prompt that scores
+well here works in the product.
+
+**The loop actually closes.** lc-agent fetches prompts by the `production`
+label and caches its graph keyed on prompt version. When `auto_improve.py`
+publishes, live agent behaviour changes within the cache TTL — no rebuild, no
+restart.
+
+**Correctness is a gate, not a term.** In the blended score, deterministic
+correctness is weighted double, and `auto_improve.py` refuses to publish at all
+if correctness regressed — however much the prose improved.
+
+## Setup
+
+```bash
+pip install -r langfuse/requirements.txt
+```
+
+Publish lc-agent's port so the pipeline can reach it. In `docker-compose.yml`:
+
+```yaml
+  lc-agent:
+    ports:
+      - "3002:3002"
+```
+
+Add to `.env`:
+
+```dotenv
+AGENT_BASE_URL=http://localhost:3002/v1
+
+# Judge needs reliable JSON — do not use a free tier here, malformed JSON
+# silently zeroes your scores.
+JUDGE_PROVIDER=openrouter
+JUDGE_MODEL=openai/gpt-oss-120b
+
+IMPROVER_PROVIDER=openrouter
+IMPROVER_MODEL=openai/gpt-oss-120b
+```
+
+`CH_HOST_BARE`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `AGENT_API_KEY` and
+the Langfuse keys are already there from the main setup.
+
+## Run it
+
+```bash
+# everything: seed + baseline across all three datasets
+bash langfuse/scripts/run_pipeline.sh baseline-v1
+
+# or step by step
+python langfuse/evals/seed_datasets.py
+python langfuse/experiments/run_experiment.py \
+    --dataset liv-concurrency-evals --run-name baseline-v1
+
+# deterministic scores only — fast, free, no judge tokens
+python langfuse/experiments/run_experiment.py \
+    --dataset liv-traps --run-name traps-v1 --no-judge
+
+# edit the prompt in the Langfuse UI, then run a challenger
+python langfuse/experiments/run_experiment.py \
+    --dataset liv-concurrency-evals --run-name v2
+
+# compare and publish the winner
+python langfuse/experiments/auto_improve.py \
+    --prompt liv-concurrency-agent --dataset liv-concurrency-evals \
+    --baseline baseline-v1 --challenger v2
+```
+
+## The datasets
+
+| Dataset | Items | Scored on |
+|---|---|---|
+| `liv-concurrency-evals` | peak, average, filtered slices, peak users | `numeric_accuracy`, `reports_moment` |
+| `liv-segment-evals` | platform/country/title comparisons | `numeric_accuracy`, `reports_moment` |
+| `liv-traps` | false-premise questions | `rule_compliance` |
+
+`liv-traps` is small and matters most. It is the only set that tests whether the
+correctness rules in `CLICKHOUSE_TOOL_HINT` are doing real work or just sitting
+in the context window being ignored. An agent that answers "the combined total
+peak is 4,812" has failed in a way no other dataset detects.
+
+## Evaluators
+
+**Deterministic** (`correctness.py`, no LLM, free):
+
+- `numeric_accuracy` — the true peak value appears in the answer, tolerant of
+  separators and 2% rounding
+- `reports_moment` — a time is stated. The most common failure is a correct
+  number with no minute attached, which discards the fact that a peak is a moment
+- `rule_compliance` — trap questions were refused rather than answered
+
+**Judged** (`llm_judge.py`, 0–10): groundedness, conciseness, actionability,
+clarity.
+
+## Improving the agents vs improving prompts
+
+`--prompt` takes an agent prompt name (`liv-router-agent`,
+`liv-concurrency-agent`, `liv-segment-agent`, `liv-capacity-agent`) — the same
+ones `lc-agent/push_agent_prompts.py` publishes. There is deliberately no
+second prompt family here: one set of prompts, evaluated and improved in place.
+
+Schema and the three correctness rules stay in `lc-agent/config.py` as
+`CLICKHOUSE_TOOL_HINT`, and `IMPROVE_SYSTEM` explicitly forbids the improver
+from adding them to the prompt. Two sources of truth for the same rules would
+drift, and a rewrite could quietly weaken the one thing keeping the SQL correct.
